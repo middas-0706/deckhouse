@@ -192,10 +192,12 @@ dex_curl() {
 
 # dex_authorize <EMAIL> <PASSWORD> <CLIENT_ID> <REDIRECT_URI> <SCOPE> [CURL_ARGS...]
 # Runs the authorization code flow of the local connector the way a browser does: it opens
-# /auth/local (bypassing the connector choice page), follows the redirect to the login form and
-# posts the credentials. It never follows the redirect to the client. Results:
-#   AUTH_STATUS    HTTP code of the credentials POST (or of the first request when no form was reached);
-#   AUTH_LOCATION  absolute redirect URL of that response, empty when there is none;
+# /auth/local (bypassing the connector choice page), follows the redirect to the login form, posts
+# the credentials and follows the steps of the Dex flow (dex_follow_steps). It never follows the
+# redirect to the client. Results:
+#   AUTH_STATUS    HTTP code of the last answer: of the last step, of the credentials POST, or of the
+#                  first request when no form was reached;
+#   AUTH_LOCATION  absolute redirect URL of that answer, empty when there is none;
 #   AUTH_CODE      authorization code when Dex redirected to REDIRECT_URI with a code;
 #   AUTH_ERROR     OAuth2 error when Dex redirected to REDIRECT_URI with an error;
 #   AUTH_BODY      file with the response body; AUTH_JAR - the cookie jar.
@@ -216,6 +218,7 @@ dex_authorize() {
   login_url="${out#* }"
   if [[ "${login_url}" != *"/auth/local/login"* ]]; then
     AUTH_LOCATION="${login_url}"
+    dex_follow_steps "$@" || return 1
     auth_parse_redirect "${redirect_uri}" "${state}"
     return 0
   fi
@@ -223,7 +226,26 @@ dex_authorize() {
     --data-urlencode "login=${email}" --data-urlencode "password@$(secret_file "${password}")" "${login_url}")" || return 1
   AUTH_STATUS="${out%% *}"
   AUTH_LOCATION="${out#* }"
+  dex_follow_steps "$@" || return 1
   auth_parse_redirect "${redirect_uri}" "${state}"
+}
+
+# dex_follow_steps [CURL_ARGS...] follows the redirects inside the Dex flow with AUTH_JAR. Since
+# v2.46, Dex answers the password form, the second factor and the approval page with a 303 to the
+# /auth dispatcher (a URL with req and hmac), which picks the next step: the entry of the second
+# factor (/mfa), the approval page, or the redirect to the client. The helper follows /auth and
+# /mfa and stops at a page the user acts on (/mfa/totp, /approval, /password/change), at the
+# redirect to the client, or at an answer that is not a redirect. It updates AUTH_STATUS,
+# AUTH_LOCATION and AUTH_BODY.
+dex_follow_steps() {
+  local out hops=0
+  while [[ "${AUTH_STATUS}" == 30[23] \
+    && ( "${AUTH_LOCATION}" == "${DEX_ISSUER}/auth?"* || "${AUTH_LOCATION}" == "${DEX_ISSUER}/mfa?"* ) ]]; do
+    (( hops++ < 5 )) || { >&2 echo "Dex redirected within its flow more than 5 times"; return 1; }
+    out="$(dex_curl "$@" -b "${AUTH_JAR}" -c "${AUTH_JAR}" -o "${AUTH_BODY}" -w '%{http_code} %{redirect_url}' "${AUTH_LOCATION}")" || return 1
+    AUTH_STATUS="${out%% *}"
+    AUTH_LOCATION="${out#* }"
+  done
 }
 
 auth_parse_redirect() {

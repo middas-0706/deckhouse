@@ -7,9 +7,10 @@ spec:
     Verify the capability aggregation of the granular role model. The capabilities the module
     ships must be aggregated into their roles: d8:namespace-capability:user-authz:view into
     d8:namespace:viewer, d8:namespace-capability:user-authz:edit into d8:namespace:manager and
-    d8:system-capability:user-authz:edit into d8:subsystem:security:manager and
-    d8:system:manager. A custom namespace capability must reach d8:namespace:viewer and every
-    role above it, grant its rules to a viewer RoleBinding and leave with its ClusterRole.
+    d8:system-capability:user-authz:edit into d8:subsystem:iam:manager and
+    d8:system:manager, but not into d8:subsystem:security:manager. A custom namespace capability
+    must reach d8:namespace:viewer and every role above it, grant its rules to a viewer RoleBinding
+    and leave with its ClusterRole.
   timeouts:
     apply: 60s
     assert: 2m
@@ -63,14 +64,22 @@ spec:
               metadata:
                 name: d8:namespace:viewer
               (length((rules || `[]`)[?contains(resources || `[]`, 'authorizationrules') && contains(verbs, 'create')])): 0
-        - description: Assert d8:subsystem:security:manager writes ClusterAuthorizationRules
+        - description: Assert d8:subsystem:iam:manager writes ClusterAuthorizationRules
+          assert:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRole
+              metadata:
+                name: d8:subsystem:iam:manager
+              (length((rules || `[]`)[?contains(resources || `[]`, 'clusterauthorizationrules') && contains(verbs, 'create')]) > `0`): true
+        - description: Assert d8:subsystem:security:manager does not write ClusterAuthorizationRules
           assert:
             resource:
               apiVersion: rbac.authorization.k8s.io/v1
               kind: ClusterRole
               metadata:
                 name: d8:subsystem:security:manager
-              (length((rules || `[]`)[?contains(resources || `[]`, 'clusterauthorizationrules') && contains(verbs, 'create')]) > `0`): true
+              (length((rules || `[]`)[?contains(resources || `[]`, 'clusterauthorizationrules') && contains(verbs, 'create')])): 0
         - description: Assert d8:system:manager writes ClusterAuthorizationRules
           assert:
             resource:

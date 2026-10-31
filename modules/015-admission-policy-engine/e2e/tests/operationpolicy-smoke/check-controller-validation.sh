@@ -14,26 +14,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Checks podSecurityStandards.controllerValidation for an OperationPolicy: with the setting at its
-# default `true`, a Deployment whose pod template breaks the policy is denied at the Deployment
-# itself; with `false`, only the Pod is checked and the Deployment is admitted. The expectation
-# follows the setting of the cluster, which the suite does not change.
+# Checks podSecurityStandards.controllerValidation for an OperationPolicy with `enforcementAction: Deny`.
+# A Deployment whose pod template breaks the policy is answered as the module parameters say:
+#   - `controllerValidation: false` — only the Pod is checked, the Deployment is admitted;
+#   - `controllerValidationEnforcement: Warn` (default) — the Deployment is admitted with a warning
+#     of the `d8-controllers-e2e-ape-op` constraint, the Pods it creates are denied;
+#   - `controllerValidationEnforcement: Policy` — the Deployment is denied by the policy itself.
+# The expectation follows the settings of the cluster, which the suite does not change.
 set -Eeuo pipefail
 source "../common/scripts/lib.sh"
 
 mc="$(kubectl get moduleconfig admission-policy-engine --ignore-not-found -o json)"
 [[ -n "${mc}" ]] || mc='{}'
 setting="$(jq -r 'if .spec.settings.podSecurityStandards.controllerValidation == false then "false" else "true" end' <<<"${mc}")"
-log "podSecurityStandards.controllerValidation: ${setting}"
+enforcement="$(jq -r '.spec.settings.podSecurityStandards.controllerValidationEnforcement // "Warn"' <<<"${mc}")"
+log "podSecurityStandards.controllerValidation: ${setting}, controllerValidationEnforcement: ${enforcement}"
 
 patch='.spec.containers[0].image = "docker.io/library/busybox:1.36"'
 if [[ "${setting}" == "false" ]]; then
   bash ../common/scripts/probe.sh --expect allow --kind deployment --namespace e2e-ape-op \
     --name bad-repo-deployment --timeout 60 --patch "${patch}"
-else
+elif [[ "${enforcement}" == "Policy" ]]; then
   bash ../common/scripts/probe.sh --expect deny --kind deployment --namespace e2e-ape-op \
     --name bad-repo-deployment --timeout 120 --patch "${patch}" \
     --match '\[e2e-ape-op\]' --match 'has an invalid image repo'
+else
+  bash ../common/scripts/probe.sh --expect warn --kind deployment --namespace e2e-ape-op \
+    --name bad-repo-deployment --timeout 120 --patch "${patch}" \
+    --match '\[d8-controllers-e2e-ape-op\]' --match 'has an invalid image repo'
 fi
 bash ../common/scripts/probe.sh --expect allow --kind deployment --namespace e2e-ape-op \
   --name good-deployment --timeout 60

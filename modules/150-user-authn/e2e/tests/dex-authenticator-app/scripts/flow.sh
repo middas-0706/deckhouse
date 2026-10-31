@@ -83,9 +83,12 @@ login_url="${out#* }"
 [[ "${login_url}" == *"/auth/local/login"* ]] || die "Dex did not open the login form: '${out%%\?*}': $(html_text "${body}" | head -c 300)"
 out="$(dex_curl -b "${dex_jar}" -c "${dex_jar}" -o "${body}" -w '%{http_code} %{redirect_url}' \
   --data-urlencode "login=${email}" --data-urlencode "password@$(secret_file "${password}")" "${login_url}")"
-callback_url="${out#* }"
-[[ "${out%% *}" == "303" && "${callback_url}" == "${redirect_uri}?"*"code="* ]] \
-  || die "Dex must redirect to the callback with a code, got '${out%%\?*}': $(html_text "${body}" | head -c 300)"
+# Dex answers the form with a redirect to its /auth dispatcher, which redirects to the callback.
+AUTH_JAR="${dex_jar}" AUTH_BODY="${body}" AUTH_STATUS="${out%% *}" AUTH_LOCATION="${out#* }"
+dex_follow_steps
+callback_url="${AUTH_LOCATION}"
+[[ "${AUTH_STATUS}" == "303" && "${callback_url}" == "${redirect_uri}?"*"code="* ]] \
+  || die "Dex must redirect to the callback with a code, got '${AUTH_STATUS} ${callback_url%%\?*}': $(html_text "${body}" | head -c 300)"
 log "Dex: HTTP 303 to the callback with an authorization code"
 
 # 4. The callback redeems the code and sets the session cookie.

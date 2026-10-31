@@ -15,15 +15,16 @@
 # limitations under the License.
 
 # Signs e2e-authn-2fa-user in with staticUsers2FA enabled: password form, then the TOTP page,
-# then the approval page, and finally the authorization code.
+# and finally the authorization code (the approval page only when Dex shows it).
 #
 # Usage: totp-login.sh enroll|known
 #   enroll  the TOTP page must show the enrollment QR code (no confirmed TOTP yet); a wrong
 #           code is refused before the right one is accepted;
 #   known   the TOTP page must ask for a code without a QR code.
 #
-# The TOTP secret is read from the OfflineSessions object of the user in d8-user-authn, the
-# way an authenticator app reads it from the QR code, and the code is computed with openssl.
+# The TOTP key is read from the UserIdentity object of the user in d8-user-authn
+# (mfaSecrets.totp.secret, an otpauth:// URL), the way an authenticator app reads it from the
+# QR code, and the code is computed with openssl.
 set -Eeuo pipefail
 source ../../tests/common/scripts/lib.sh
 
@@ -61,35 +62,42 @@ case "${mode}" in
     ;;
 esac
 
-otpauth="$(kubectl -n d8-user-authn get offlinesessionses.dex.coreos.com -o json \
-  | jq -r '[.items[] | select(.userID == "e2e-authn-2fa-user" and .connID == "local") | .totp] | first // empty')"
-[[ "${otpauth}" == otpauth://* ]] || die "the OfflineSessions object of the user has no TOTP key"
+totp_key="$(kubectl -n d8-user-authn get useridentities.dex.coreos.com -o json \
+  | jq -c '[.items[] | select(.userID == "e2e-authn-2fa-user" and .connectorID == "local") | .mfaSecrets.totp // empty] | first // empty')"
+otpauth="$(jq -r '.secret // empty' <<<"${totp_key:-null}")"
+[[ "${otpauth}" == otpauth://* ]] || die "the UserIdentity object of the user has no TOTP key"
 secret="$(query_param "${otpauth}" secret)"
+# Dex accepts each time step once (lastUsedCounter): the code of the step accepted by the
+# previous sign-in is refused, so wait for the next step.
+last_counter="$(jq -r '.lastUsedCounter // 0' <<<"${totp_key:-null}")"
+while (( $(date +%s) / 30 <= last_counter )); do sleep 2; done
 code="$(totp_code "${secret}")"
 
 if [[ "${mode}" == "enroll" ]]; then
   wrong="$(printf '%06d' $(( (10#${code} + 500000) % 1000000 )))"
   out="$(page --data-urlencode "totp=${wrong}" "${totp_url}")"
-  # Dex renders the TOTP page again with HTTP 401 (patch 004-2fa, w.WriteHeader(http.StatusUnauthorized)).
-  [[ "${out%% *}" == "401" ]] && grep -q "Invalid or Expired User Code" "${AUTH_BODY}" \
+  # Dex renders the TOTP page again with HTTP 200 and an error (server/mfa/totp.go, renderTOTPPage).
+  [[ "${out%% *}" == "200" ]] && grep -q "Invalid code" "${AUTH_BODY}" \
     || die "a wrong TOTP code must be refused: '${out%%\?*}' $(html_text "${AUTH_BODY}" | head -c 300)"
   log "A wrong TOTP code is refused"
   code="$(totp_code "${secret}")"
 fi
 
 out="$(page --data-urlencode "totp=${code}" "${totp_url}")"
-approval_url="${out#* }"
 [[ "${out%% *}" == "303" ]] || die "the right TOTP code must be accepted with 303, got '${out%%\?*}': $(html_text "${AUTH_BODY}" | head -c 300)"
 log "The TOTP code is accepted"
+# Dex redirects to its /auth dispatcher, which redirects to the client or to the approval page.
+AUTH_STATUS="${out%% *}" AUTH_LOCATION="${out#* }"
+dex_follow_steps
 
-# With 2FA the module turns the approval screen on (skipApprovalScreen: false).
-if [[ "${approval_url}" == *"/approval?"* ]]; then
+# The module skips the approval screen (skipApprovalScreen: true); it is passed if Dex shows it.
+if [[ "${AUTH_LOCATION}" == *"/approval?"* ]]; then
+  approval_url="${AUTH_LOCATION}"
   out="$(page "${approval_url}")"
   [[ "${out%% *}" == "200" ]] || die "the approval page must answer 200, got '${out%%\?*}'"
   out="$(page --data-urlencode "approval=approve" "${approval_url}")"
-  AUTH_LOCATION="${out#* }"
-else
-  AUTH_LOCATION="${approval_url}"
+  AUTH_STATUS="${out%% *}" AUTH_LOCATION="${out#* }"
+  dex_follow_steps
 fi
 [[ "${AUTH_LOCATION}" == "${TEST_REDIRECT_URI}?"*"code="* ]] \
   || die "after the second factor Dex must redirect to the client with a code, got '${AUTH_LOCATION%%\?*}'"

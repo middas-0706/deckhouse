@@ -6,20 +6,19 @@ spec:
   description: >-
     With staticUsers2FA enabled, a local user who passed the password form must enter a TOTP code.
     The first time the page shows the enrollment QR code; a wrong code is refused, the right one
-    (computed from the key Dex stored for the user) leads through the approval page to the
-    authorization code. The next sign-in asks for a code without the QR code. A UserOperation
-    Reset2FA deletes the key, so the user enrolls again. The original settings are restored.
+    (computed from the key Dex stored for the user) leads to the authorization code. The next
+    sign-in asks for a code without the QR code. A UserOperation Reset2FA deletes the key, so the user enrolls again. The original settings are restored.
   concurrent: false
 
   catch:
-    - description: Show the OfflineSessions of the user without the TOTP key on failure
+    - description: Show the UserIdentity of the user without the TOTP key on failure
       script:
         # Chainsaw runs scripts with /bin/sh (dash on the master); the scripts are bash.
         shell: bash
         shellArgs: ["-c"]
         content: |
-          kubectl -n d8-user-authn get offlinesessionses.dex.coreos.com -o json \
-            | jq '.items[] | select(.userID == "e2e-authn-2fa-user") | {name: .metadata.name, connID, totpConfirmed, hasTOTP: (.totp != null)}'
+          kubectl -n d8-user-authn get useridentities.dex.coreos.com -o json \
+            | jq '.items[] | select(.userID == "e2e-authn-2fa-user") | {name: .metadata.name, connectorID, totpConfirmed: .mfaSecrets.totp.confirmed, hasTOTP: (.mfaSecrets.totp.secret != null)}'
     - description: Show Dex logs on failure
       podLogs:
         namespace: d8-user-authn
@@ -79,7 +78,7 @@ spec:
             shellArgs: ["-c"]
             timeout: 25m
             content: bash ../../tests/common/scripts/mc-settings.sh apply '{"staticUsers2FA":{"enabled":true}}'
-        - description: Wait until the Dex configuration has twoFactorAuthn and Dex rolled out
+        - description: Wait until the Dex configuration has the TOTP chain and Dex rolled out
           script:
             # Chainsaw runs scripts with /bin/sh (dash on the master); the scripts are bash.
             shell: bash
@@ -88,7 +87,7 @@ spec:
             content: |
               set -euo pipefail
               source ../../tests/common/scripts/lib.sh
-              wait_dex_config 600 '^ *twoFactorAuthn:'
+              wait_dex_config 600 '^ *defaultMFAChain:'
       cleanup:
         - description: Restore the original ModuleConfig user-authn spec
           script:
@@ -115,9 +114,9 @@ spec:
           assert:
             timeout: 1m
             resource:
-              (x_k8s_list($client, 'dex.coreos.com/v1', 'OfflineSessions', 'd8-user-authn').items[?userID == 'e2e-authn-2fa-user' && connID == 'local']):
+              (x_k8s_list($client, 'dex.coreos.com/v1', 'UserIdentity', 'd8-user-authn').items[?userID == 'e2e-authn-2fa-user' && connectorID == 'local']):
                 (length(@)): 1
-                ([0].totpConfirmed): true
+                ([0].mfaSecrets.totp.confirmed): true
         - description: Sign in again with the password and a TOTP code
           script:
             # Chainsaw runs scripts with /bin/sh (dash on the master); the scripts are bash.
@@ -153,11 +152,11 @@ spec:
                 name: e2e-authn-2fa-reset
               status:
                 phase: Succeeded
-        - description: Assert the OfflineSessions object with the TOTP key is gone
+        - description: Assert the UserIdentity of the user has no TOTP key
           assert:
             timeout: 1m
             resource:
-              (length(x_k8s_list($client, 'dex.coreos.com/v1', 'OfflineSessions', 'd8-user-authn').items[?userID == 'e2e-authn-2fa-user' && connID == 'local'])): 0
+              (length(x_k8s_list($client, 'dex.coreos.com/v1', 'UserIdentity', 'd8-user-authn').items[?userID == 'e2e-authn-2fa-user' && connectorID == 'local' && mfaSecrets.totp])): 0
         - description: Assert the next sign-in shows the enrollment QR code again
           script:
             # Chainsaw runs scripts with /bin/sh (dash on the master); the scripts are bash.
